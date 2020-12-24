@@ -1,5 +1,7 @@
 package com.alibaba.datax.plugin.writer.hdfswriter;
 
+// refs : https://blog.csdn.net/qq_36190960/article/details/107664495?spm=1001.2101.3001.4242
+// Parquet 列式存储格式 : https://www.cnblogs.com/windliu/p/10942252.html
 import com.alibaba.datax.common.element.Column;
 import com.alibaba.datax.common.element.Record;
 import com.alibaba.datax.common.exception.DataXException;
@@ -27,6 +29,10 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.text.SimpleDateFormat;
 import java.util.*;
+
+import org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe;
+import org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat;
+import org.apache.hadoop.io.*;
 
 public  class HdfsHelper {
     public static final Logger LOG = LoggerFactory.getLogger(HdfsWriter.Job.class);
@@ -395,7 +401,53 @@ public  class HdfsHelper {
             throw DataXException.asDataXException(HdfsWriterErrorCode.Write_FILE_IO_ERROR, e);
         }
     }
+    
+    
+    public void parFileStartWrite(RecordReceiver lineReceiver, Configuration config, String fileName,
+                                  TaskPluginCollector taskPluginCollector) {
+        List<Configuration> columns = config.getListConfiguration(Key.COLUMN);
+        String compress = config.getString(Key.COMPRESS, null);
+        List<String> columnNames = getColumnNames(columns);
+        List<ObjectInspector> columnTypeInspectors = getColumnTypeInspectors(columns);
+        StructObjectInspector inspector = (StructObjectInspector) ObjectInspectorFactory
+          .getStandardStructObjectInspector(columnNames, columnTypeInspectors);
 
+        ParquetHiveSerDe parquetHiveSerDe = new ParquetHiveSerDe();
+
+        MapredParquetOutputFormat outFormat = new MapredParquetOutputFormat();
+        if (!"NONE".equalsIgnoreCase(compress) && null != compress) {
+            Class<? extends CompressionCodec> codecClass = getCompressCodec(compress);
+            if (null != codecClass) {
+                outFormat.setOutputCompressorClass(conf, codecClass);
+            }
+        }
+        try {
+            Properties colProperties = new Properties();
+            colProperties.setProperty("columns", String.join(",", columnNames));
+            List<String> colType = Lists.newArrayList();
+            columns.forEach(c -> colType.add(c.getString(Key.TYPE).toLowerCase()));
+            colProperties.setProperty("columns.types", String.join(":", colType));
+            LOG.info("colProperties=\n"+colProperties);
+
+            RecordWriter writer = (RecordWriter) outFormat.getHiveRecordWriter(conf, new Path(fileName), ObjectWritable.class, true, colProperties, Reporter.NULL);
+            Record record = null;
+            while ((record = lineReceiver.getFromReader()) != null) {
+                MutablePair<List<Object>, Boolean> transportResult = transportOneRecord(record, columns, taskPluginCollector);
+                if (!transportResult.getRight()) {
+                    writer.write(null, parquetHiveSerDe.serialize(transportResult.getLeft(), inspector));
+                }
+            }
+            writer.close(Reporter.NULL);
+        } catch (Exception e) {
+            String message = String.format("写文件文件[%s]时发生IO异常,请检查您的网络是否正常！", fileName);
+            LOG.error(message);
+            Path path = new Path(fileName);
+            deleteDir(path.getParent());
+            throw DataXException.asDataXException(HdfsWriterErrorCode.Write_FILE_IO_ERROR, e);
+        }
+    }
+
+    
     public List<String> getColumnNames(List<Configuration> columns){
         List<String> columnNames = Lists.newArrayList();
         for (Configuration eachColumnConf : columns) {

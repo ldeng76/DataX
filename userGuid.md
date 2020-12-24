@@ -40,6 +40,7 @@ DataX本身作为数据同步框架，将不同数据源的同步抽象为从源
     ``` shell
     $ cd  {DataX_source_code_home}
     $ mvn -U clean package assembly:assembly -Dmaven.test.skip=true
+    单独编译,打包某个模块：mvn package -pl hdfswriter -am  -Dmaven.test.skip=true
     ```
     
     打包成功，日志显示如下：
